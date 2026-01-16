@@ -8,12 +8,514 @@
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <style>
+    body { margin: 0; padding: 0; }
+    #dice-canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 40; display: none; }
+    #dice-canvas.active { display: block; }
+    #root { position: relative; z-index: 1; }
+  </style>
 </head>
 <body>
   <div id="root"></div>
+  <canvas id="dice-canvas"></canvas>
   
   <script type="text/babel">
     const { useState, useEffect } = React;
+
+    // 3D Dice Animation Engine with Direct Collision Detection
+    class DicePhysicsEngine {
+      constructor() {
+        this.scene = null;
+        this.camera = null;
+        this.renderer = null;
+        this.dice = [];
+        this.running = false;
+        this.frameId = null;
+        this.walls = null;
+      }
+
+      init() {
+        try {
+          const canvas = document.getElementById('dice-canvas');
+          this.canvas = canvas;
+          
+          // Three.js setup
+          this.scene = new THREE.Scene();
+          this.scene.background = null;
+          
+          this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+          this.camera.position.set(0, 20, 0);
+          this.camera.lookAt(0, 0, 0);
+          
+          this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+          this.renderer.setSize(window.innerWidth, window.innerHeight);
+          this.renderer.shadowMap.enabled = true;
+
+          // Lighting
+          const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+          this.scene.add(ambientLight);
+          
+          const directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
+          directionalLight.position.set(10, 20, 10);
+          directionalLight.castShadow = true;
+          this.scene.add(directionalLight);
+
+          // Calculate boundary walls
+          this.calculateWalls();
+          
+          console.log('Dice engine initialized with collision detection');
+          window.addEventListener('resize', () => this.onWindowResize());
+        } catch (e) {
+          console.error('Failed to initialize dice engine:', e);
+        }
+      }
+
+      calculateWalls() {
+        const vFOV = (this.camera.fov * Math.PI) / 180;
+        const height = 2 * Math.tan(vFOV / 2) * 20;
+        const width = height * (window.innerWidth / window.innerHeight);
+
+        this.walls = {
+          left: -width / 2,
+          right: width / 2,
+          top: 18,
+          bottom: 0,  // Page surface
+          front: 10,
+          back: -10
+        };
+      }
+
+      addBoundaryWalls() {
+        // Walls are now handled by collision detection in animate()
+      }
+
+      createPolygonGeometry(sides) {
+        const geometries = {
+          4: () => new THREE.TetrahedronGeometry(0.8, 0),
+          6: () => new THREE.BoxGeometry(1.2, 1.2, 1.2),
+          8: () => new THREE.OctahedronGeometry(0.9, 0),
+          10: () => this.createD10Geometry(),
+          12: () => new THREE.DodecahedronGeometry(0.85, 0),
+          20: () => new THREE.IcosahedronGeometry(0.85, 0)
+        };
+        return geometries[sides] ? geometries[sides]() : new THREE.BoxGeometry(1, 1, 1);
+      }
+
+      createD10Geometry() {
+        const geometry = new THREE.BufferGeometry();
+        const h = 1.0;
+        const r = 0.6;
+        const vertices = [0, h, 0];
+        for (let i = 0; i < 10; i++) {
+          const angle = (i / 10) * Math.PI * 2;
+          vertices.push(Math.cos(angle) * r, 0, Math.sin(angle) * r);
+        }
+        vertices.push(0, -h, 0);
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
+        return geometry;
+      }
+
+      addDie(sides, value, color = 0x2a4a5a) {
+        if (!this.scene) return;
+
+        const geometry = this.createPolygonGeometry(sides);
+        const material = new THREE.MeshStandardMaterial({
+          color: color,
+          metalness: 0.3,
+          roughness: 0.6,
+          emissive: 0x000000
+        });
+        
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.userData = { sides, value };
+        
+        // Spawn from random edge of tray, pointing inward
+        const edge = Math.floor(Math.random() * 4);
+        let x, y, z, vx, vz;
+        
+        const edgeMargin = (this.walls.right - this.walls.left) * 0.4;
+        const centerX = 0;
+        const centerZ = 0;
+        
+        if (edge === 0) {
+          // Left edge
+          x = this.walls.left - 2;
+          z = (Math.random() - 0.5) * (this.walls.front - this.walls.back) * 0.8;
+          vx = 12 + Math.random() * 6;
+          vz = (Math.random() - 0.5) * 4;
+        } else if (edge === 1) {
+          // Right edge
+          x = this.walls.right + 2;
+          z = (Math.random() - 0.5) * (this.walls.front - this.walls.back) * 0.8;
+          vx = -(12 + Math.random() * 6);
+          vz = (Math.random() - 0.5) * 4;
+        } else if (edge === 2) {
+          // Front edge
+          z = this.walls.front + 2;
+          x = (Math.random() - 0.5) * (this.walls.right - this.walls.left) * 0.8;
+          vz = -(12 + Math.random() * 6);
+          vx = (Math.random() - 0.5) * 4;
+        } else {
+          // Back edge
+          z = this.walls.back - 2;
+          x = (Math.random() - 0.5) * (this.walls.right - this.walls.left) * 0.8;
+          vz = 12 + Math.random() * 6;
+          vx = (Math.random() - 0.5) * 4;
+        }
+        
+        y = 12 + Math.random() * 4;
+        
+        mesh.position.set(x, y, z);
+        
+        // Random rotation
+        mesh.rotation.set(
+          Math.random() * Math.PI * 2,
+          Math.random() * Math.PI * 2,
+          Math.random() * Math.PI * 2
+        );
+        
+        this.scene.add(mesh);
+
+        this.dice.push({
+          mesh,
+          velocity: {
+            x: vx,
+            y: -6,
+            z: vz
+          },
+          angularVel: {
+            x: Math.random() * 40 - 20,
+            y: Math.random() * 40 - 20,
+            z: Math.random() * 40 - 20
+          },
+          radius: 0.8,
+          settled: false,
+          settlingTime: 0,
+          targetRotation: null
+        });
+      }
+
+      animate() {
+        if (!this.running) return;
+        
+        const dt = 0.016; // ~60fps
+        const gravity = 30;
+        const settleThreshold = 0.1; // velocity below which die is considered at rest
+        const settleDuration = 1.0; // seconds to tween into final position
+        
+        this.dice.forEach(die => {
+          if (die.settled) {
+            // Die has settled, just do tweening if needed
+            if (die.settlingTime < settleDuration) {
+              die.settlingTime += dt;
+              const progress = die.settlingTime / settleDuration;
+              
+              // Tween rotation toward target
+              die.mesh.rotation.x += (die.targetRotation.x - die.mesh.rotation.x) * progress * 0.3;
+              die.mesh.rotation.y += (die.targetRotation.y - die.mesh.rotation.y) * progress * 0.3;
+              die.mesh.rotation.z += (die.targetRotation.z - die.mesh.rotation.z) * progress * 0.3;
+            } else {
+              // Snap to final rotation
+              die.mesh.rotation.x = die.targetRotation.x;
+              die.mesh.rotation.y = die.targetRotation.y;
+              die.mesh.rotation.z = die.targetRotation.z;
+            }
+            return; // Skip physics for settled dice
+          }
+
+          // Apply gravity
+          die.velocity.y -= gravity * dt;
+          
+          // Update position
+          die.mesh.position.x += die.velocity.x * dt;
+          die.mesh.position.y += die.velocity.y * dt;
+          die.mesh.position.z += die.velocity.z * dt;
+          
+          // Update rotation
+          die.mesh.rotation.x += die.angularVel.x * dt;
+          die.mesh.rotation.y += die.angularVel.y * dt;
+          die.mesh.rotation.z += die.angularVel.z * dt;
+          
+          // Collision detection with walls
+          const restitution = 0.6;
+          const radius = die.radius || 0.8;
+          
+          // Left wall
+          if (die.mesh.position.x - radius < this.walls.left) {
+            die.mesh.position.x = this.walls.left + radius;
+            die.velocity.x *= -restitution;
+          }
+          
+          // Right wall
+          if (die.mesh.position.x + radius > this.walls.right) {
+            die.mesh.position.x = this.walls.right - radius;
+            die.velocity.x *= -restitution;
+          }
+          
+          // Top wall
+          if (die.mesh.position.y + radius > this.walls.top) {
+            die.mesh.position.y = this.walls.top - radius;
+            die.velocity.y *= -restitution;
+          }
+          
+          // Bottom wall
+          if (die.mesh.position.y - radius < this.walls.bottom) {
+            die.mesh.position.y = this.walls.bottom + radius;
+            die.velocity.y *= -restitution;
+            die.angularVel.x *= 0.8; // Dampen angular velocity on ground impact
+            die.angularVel.y *= 0.8;
+            die.angularVel.z *= 0.8;
+          }
+          
+          // Front wall
+          if (die.mesh.position.z + radius > this.walls.front) {
+            die.mesh.position.z = this.walls.front - radius;
+            die.velocity.z *= -restitution;
+          }
+          
+          // Back wall
+          if (die.mesh.position.z - radius < this.walls.back) {
+            die.mesh.position.z = this.walls.back + radius;
+            die.velocity.z *= -restitution;
+          }
+          
+          // Simple friction
+          die.velocity.x *= 0.995;
+          die.velocity.z *= 0.995;
+          die.angularVel.x *= 0.99;
+          die.angularVel.y *= 0.99;
+          die.angularVel.z *= 0.99;
+          
+          // Check if die has settled
+          const speed = Math.sqrt(die.velocity.x ** 2 + die.velocity.y ** 2 + die.velocity.z ** 2);
+          const angularSpeed = Math.sqrt(die.angularVel.x ** 2 + die.angularVel.y ** 2 + die.angularVel.z ** 2);
+          
+          if (speed < settleThreshold && angularSpeed < settleThreshold && die.mesh.position.y <= this.walls.bottom + 1) {
+            die.settled = true;
+            die.settlingTime = 0;
+            die.velocity = { x: 0, y: 0, z: 0 };
+            die.angularVel = { x: 0, y: 0, z: 0 };
+            
+            // Snap to nearest face orientation based on rolled value
+            die.targetRotation = this.getRestingRotation(die);
+          }
+        });
+        
+        // Dice-to-dice collision detection
+        for (let i = 0; i < this.dice.length; i++) {
+          for (let j = i + 1; j < this.dice.length; j++) {
+            if (!this.dice[i].settled && !this.dice[j].settled) {
+              this.checkDiceCollision(this.dice[i], this.dice[j]);
+            }
+          }
+        }
+
+        this.renderer.render(this.scene, this.camera);
+        this.frameId = requestAnimationFrame(() => this.animate());
+      }
+
+      getRestingRotation(die) {
+        const sides = die.mesh.userData.sides;
+        const value = die.mesh.userData.value;
+        
+        // Map each die type and face value to a specific rotation
+        // These are approximate orientations where that face points up
+        const rotations = {
+          4: [
+            { x: 0, y: 0, z: 0 },
+            { x: Math.PI, y: 0, z: 0 },
+            { x: 0, y: Math.PI / 2, z: 0 },
+            { x: 0, y: -Math.PI / 2, z: 0 }
+          ],
+          6: [
+            { x: 0, y: 0, z: 0 },
+            { x: Math.PI, y: 0, z: 0 },
+            { x: Math.PI / 2, y: 0, z: 0 },
+            { x: -Math.PI / 2, y: 0, z: 0 },
+            { x: 0, y: Math.PI / 2, z: 0 },
+            { x: 0, y: -Math.PI / 2, z: 0 }
+          ],
+          8: [
+            { x: 0, y: 0, z: 0 },
+            { x: Math.PI / 4, y: Math.PI / 4, z: 0 },
+            { x: Math.PI / 2, y: 0, z: 0 },
+            { x: -Math.PI / 4, y: Math.PI / 4, z: 0 },
+            { x: Math.PI, y: 0, z: 0 },
+            { x: -Math.PI / 4, y: -Math.PI / 4, z: 0 },
+            { x: -Math.PI / 2, y: 0, z: 0 },
+            { x: Math.PI / 4, y: -Math.PI / 4, z: 0 }
+          ],
+          10: [
+            { x: 0, y: 0, z: 0 },
+            { x: 0.3398, y: 0, z: 0 },
+            { x: 0.6796, y: 0, z: 0 },
+            { x: 1.0194, y: 0, z: 0 },
+            { x: 1.3592, y: 0, z: 0 },
+            { x: -1.3592, y: 0, z: 0 },
+            { x: -1.0194, y: 0, z: 0 },
+            { x: -0.6796, y: 0, z: 0 },
+            { x: -0.3398, y: 0, z: 0 },
+            { x: Math.PI, y: 0, z: 0 }
+          ],
+          12: [
+            { x: 0, y: 0, z: 0 },
+            { x: 0.2618, y: 0, z: 0 },
+            { x: 0.5236, y: 0, z: 0 },
+            { x: 0.7854, y: 0, z: 0 },
+            { x: 1.0472, y: 0, z: 0 },
+            { x: 1.309, y: 0, z: 0 },
+            { x: -1.309, y: 0, z: 0 },
+            { x: -1.0472, y: 0, z: 0 },
+            { x: -0.7854, y: 0, z: 0 },
+            { x: -0.5236, y: 0, z: 0 },
+            { x: -0.2618, y: 0, z: 0 },
+            { x: Math.PI, y: 0, z: 0 }
+          ],
+          20: [
+            { x: 0, y: 0, z: 0 },
+            { x: 0.1634, y: 0, z: 0 },
+            { x: 0.3268, y: 0, z: 0 },
+            { x: 0.4902, y: 0, z: 0 },
+            { x: 0.6536, y: 0, z: 0 },
+            { x: 0.8170, y: 0, z: 0 },
+            { x: 0.9804, y: 0, z: 0 },
+            { x: 1.1438, y: 0, z: 0 },
+            { x: 1.3072, y: 0, z: 0 },
+            { x: 1.4706, y: 0, z: 0 },
+            { x: -1.4706, y: 0, z: 0 },
+            { x: -1.3072, y: 0, z: 0 },
+            { x: -1.1438, y: 0, z: 0 },
+            { x: -0.9804, y: 0, z: 0 },
+            { x: -0.8170, y: 0, z: 0 },
+            { x: -0.6536, y: 0, z: 0 },
+            { x: -0.4902, y: 0, z: 0 },
+            { x: -0.3268, y: 0, z: 0 },
+            { x: -0.1634, y: 0, z: 0 },
+            { x: Math.PI, y: 0, z: 0 }
+          ]
+        };
+        
+        const dieRotations = rotations[sides] || [{ x: 0, y: 0, z: 0 }];
+        const index = Math.max(0, Math.min(value - 1, dieRotations.length - 1));
+        return dieRotations[index];
+      }
+
+      checkDiceCollision(dice1, dice2) {
+        const r1 = dice1.radius || 0.8;
+        const r2 = dice2.radius || 0.8;
+        const minDist = r1 + r2;
+        
+        const dx = dice2.mesh.position.x - dice1.mesh.position.x;
+        const dy = dice2.mesh.position.y - dice1.mesh.position.y;
+        const dz = dice2.mesh.position.z - dice1.mesh.position.z;
+        
+        const distSq = dx * dx + dy * dy + dz * dz;
+        const minDistSq = minDist * minDist;
+        
+        if (distSq >= minDistSq) return; // No collision
+        
+        const dist = Math.sqrt(distSq);
+        if (dist === 0) return; // Prevent division by zero
+        
+        // Normalize collision vector
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const nz = dz / dist;
+        
+        // Separate dice to prevent overlap
+        const overlap = (minDist - dist) / 2 + 0.001;
+        dice1.mesh.position.x -= nx * overlap;
+        dice1.mesh.position.y -= ny * overlap;
+        dice1.mesh.position.z -= nz * overlap;
+        
+        dice2.mesh.position.x += nx * overlap;
+        dice2.mesh.position.y += ny * overlap;
+        dice2.mesh.position.z += nz * overlap;
+        
+        // Relative velocity
+        const dvx = dice2.velocity.x - dice1.velocity.x;
+        const dvy = dice2.velocity.y - dice1.velocity.y;
+        const dvz = dice2.velocity.z - dice1.velocity.z;
+        
+        // Relative velocity along collision normal
+        const dvn = dvx * nx + dvy * ny + dvz * nz;
+        
+        // Don't process if velocities are separating
+        if (dvn >= 0) return;
+        
+        // Collision impulse (assuming equal mass)
+        const restitution = 0.5;
+        const impulse = -(1 + restitution) * dvn / 2;
+        
+        // Apply impulse
+        dice1.velocity.x -= impulse * nx;
+        dice1.velocity.y -= impulse * ny;
+        dice1.velocity.z -= impulse * nz;
+        
+        dice2.velocity.x += impulse * nx;
+        dice2.velocity.y += impulse * ny;
+        dice2.velocity.z += impulse * nz;
+      }
+
+      start(diceData) {
+        if (!this.scene) {
+          console.warn('Dice engine not ready');
+          return;
+        }
+        
+        // Clear any leftover physics bodies from previous rolls
+        this.clearDynamicBodies();
+        
+        this.running = true;
+        this.canvas.classList.add('active');
+        diceData.forEach(d => this.addDie(d.sides, d.value, d.color));
+        this.animate();
+      }
+
+      clearDynamicBodies() {
+        try {
+          // Remove dice from scene
+          this.dice.forEach(d => {
+            this.scene.remove(d.mesh);
+          });
+          
+          this.dice = [];
+        } catch (e) {
+          console.warn('Error clearing dynamic bodies:', e);
+        }
+      }
+
+      stop(callback) {
+        this.running = false;
+        setTimeout(() => {
+          cancelAnimationFrame(this.frameId);
+          this.clearDynamicBodies();
+          this.canvas.classList.remove('active');
+          if (callback) callback();
+        }, 1000);
+      }
+
+      onWindowResize() {
+        if (!this.camera || !this.renderer) return;
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+    }
+
+    const diceEngine = new DicePhysicsEngine();
+    
+    // Lazy-load dice engine to avoid blocking React
+    setTimeout(() => {
+      try {
+        diceEngine.init();
+      } catch (e) {
+        console.error('Dice engine init failed:', e);
+      }
+    }, 0);
     
     // Lucide icons as inline SVG components
     const Swords = ({ size = 24, className = "" }) => (
@@ -73,6 +575,7 @@
       const [showConfig, setShowConfig] = useState(true);
       const [results, setResults] = useState(null);
       const [attackMode, setAttackMode] = useState('normal');
+      const [diceRolls, setDiceRolls] = useState([]);
 
       useEffect(() => {
         const loadCharacters = () => {
@@ -156,6 +659,14 @@
         }
       }, [characters]);
 
+      useEffect(() => {
+        if (!diceRolls.length) return;
+        const timer = setTimeout(() => {
+          diceEngine.stop(() => setDiceRolls([]));
+        }, 3000);
+        return () => clearTimeout(timer);
+      }, [diceRolls]);
+
       const activeChar = characters[activeCharIndex] || null;
 
       const updateActiveChar = (updates) => {
@@ -169,10 +680,10 @@
           name: `Character ${characters.length + 1}`,
           attackTypes: [
             {
-              name: 'Attack',
-              count: 4,
-              bonus: 10,
-              damageDice: '1d8+5',
+              name: 'Basic Attack',
+              count: 1,
+              bonus: 5,
+              damageDice: '1d8+3',
               critRange: 20,
               smiteDice: '',
               brutalCritDice: ''
@@ -212,34 +723,63 @@
         return { dice, flat };
       };
 
-      const rollDice = (num, sides) => {
-        const rolls = [];
-        for (let i = 0; i < num; i++) {
-          rolls.push(Math.floor(Math.random() * sides) + 1);
+      const rollDie = (sides, label, collector, color = null) => {
+        const value = Math.floor(Math.random() * sides) + 1;
+        if (collector) {
+          collector.push({ sides, value, color });
         }
-        return rolls;
+        return value;
       };
 
-      const rollDiceTotal = (diceConfig) => {
+      const rollDiceTotal = (diceConfig, labelPrefix, collector, color = null) => {
         return diceConfig.reduce((sum, { num, sides }) => {
-          const rolls = rollDice(num, sides);
-          return sum + rolls.reduce((a, b) => a + b, 0);
+          let subtotal = 0;
+          for (let i = 0; i < num; i++) {
+            subtotal += rollDie(sides, `${labelPrefix} d${sides}`, collector, color);
+          }
+          return sum + subtotal;
         }, 0);
       };
 
-      const rollDamage = (diceStr) => {
+      const rollDamage = (diceStr, labelPrefix, collector, color = null) => {
         const { dice, flat } = parseDice(diceStr);
-        return flat + rollDiceTotal(dice);
+        return flat + rollDiceTotal(dice, labelPrefix, collector, color);
       };
 
-      const rollD20 = () => {
-        const rollOnce = () => Math.floor(Math.random() * 20) + 1;
+      const rollD20 = (collector, attackMode) => {
+        const getD20Color = () => {
+          if (attackMode === 'advantage') return 0x22c55e; // green
+          if (attackMode === 'disadvantage') return 0xef4444; // red
+          return 0x3b82f6; // blue (normal)
+        };
+        const d20Color = getD20Color();
+        const rollOnce = (tag) => rollDie(20, `Attack d20${tag ? ` ${tag}` : ''}`, collector, d20Color);
         if (attackMode === 'normal') return rollOnce();
-        const first = rollOnce();
-        const second = rollOnce();
+        const first = rollOnce('(1)');
+        const second = rollOnce('(2)');
         if (attackMode === 'advantage') return Math.max(first, second);
         return Math.min(first, second);
       };
+
+      // Damage dice color mapping - unique shades of blue
+      const getDamageColor = (sides) => {
+        if (!sides) return 0x3b82f6; // default blue for flat damage
+        const colors = {
+          4: 0x0ea5e9,   // sky blue
+          6: 0x06b6d4,   // cyan
+          8: 0x0891b2,   // cyan-dark
+          10: 0x0369a1,  // blue-dark
+          12: 0x1e40af,  // blue
+          20: 0x1e3a8a    // blue-darker
+        };
+        return colors[sides] || 0x3b82f6;
+      };
+
+      // Smite dice color - golden
+      const getSmiteColor = () => 0xfbbf24; // golden/amber
+
+      // Brutal critical dice color - red
+      const getBrutalColor = () => 0xdc2626; // red
 
       const performAttackSequence = () => {
         if (!activeChar) return;
@@ -247,11 +787,12 @@
         const attacks = [];
         let totalDamage = 0;
         let smiteApplied = false;
+        const diceCollector = [];
         
         // Roll all attacks from all attack types
         activeChar.attackTypes.forEach(attackType => {
           for (let i = 0; i < attackType.count; i++) {
-            const attackRoll = rollD20();
+            const attackRoll = rollD20(diceCollector, attackMode);
             const isMiss = attackRoll === 1;
             const totalAttack = isMiss ? -Infinity : attackRoll + attackType.bonus;
             const isCrit = !isMiss && attackRoll >= attackType.critRange;
@@ -260,17 +801,19 @@
 
             if (!isMiss) {
               const parsedDamage = parseDice(attackType.damageDice);
-              damage = parsedDamage.flat + rollDiceTotal(parsedDamage.dice);
+              damage = parsedDamage.flat + rollDiceTotal(parsedDamage.dice, `${attackType.name} dmg`, diceCollector, getDamageColor(parsedDamage.dice?.length > 0 ? parsedDamage.dice[0].sides : null));
 
               if (isCrit) {
-                damage += rollDiceTotal(parsedDamage.dice);
+                damage += rollDiceTotal(parsedDamage.dice, `${attackType.name} crit`, diceCollector, getDamageColor(parsedDamage.dice?.length > 0 ? parsedDamage.dice[0].sides : null));
 
                 if (attackType.brutalCritDice) {
-                  damage += rollDamage(attackType.brutalCritDice);
+                  const brutalDamage = parseDice(attackType.brutalCritDice);
+                  damage += rollDamage(attackType.brutalCritDice, `${attackType.name} brutal`, diceCollector, getBrutalColor());
                 }
 
                 if (attackType.smiteDice && !smiteApplied) {
-                  damage += rollDamage(attackType.smiteDice);
+                  const smiteDamage = parseDice(attackType.smiteDice);
+                  damage += rollDamage(attackType.smiteDice, `${attackType.name} smite`, diceCollector, getSmiteColor());
                   smiteApplied = true;
                 }
               }
@@ -314,7 +857,13 @@
         });
         
         setResults({ attacks, thresholds, totalDamage });
+        setDiceRolls(diceCollector);
         setShowConfig(false);
+        
+        // Start dice physics animation
+        if (diceCollector.length > 0) {
+          setTimeout(() => diceEngine.start(diceCollector), 100);
+        }
       };
 
       const formatOutput = () => {
@@ -616,7 +1165,15 @@
       );
     }
 
-    ReactDOM.render(<DnDAttackRoller />, document.getElementById('root'));
+    const App = () => {
+      return (
+        <>
+          <DnDAttackRoller />
+        </>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById('root'));
   </script>
 </body>
 </html>
