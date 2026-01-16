@@ -92,12 +92,20 @@
                         bonus: char.attackBonus || 10,
                         damageDice: char.damageDice || '1d8+5',
                         critRange: char.critRange || 20,
-                        critExtraDice: char.critExtraDice || ''
+                        smiteDice: '',
+                        brutalCritDice: char.critExtraDice || ''
                       }
                     ]
                   };
                 }
-                return char;
+                return {
+                  ...char,
+                  attackTypes: char.attackTypes.map(at => ({
+                    ...at,
+                    smiteDice: at.smiteDice ?? '',
+                    brutalCritDice: at.brutalCritDice ?? at.critExtraDice ?? ''
+                  }))
+                };
               });
               setCharacters(migratedChars);
             } else {
@@ -110,7 +118,8 @@
                     bonus: 10,
                     damageDice: '1d8+5',
                     critRange: 20,
-                    critExtraDice: '1d10+2d8'
+                    smiteDice: '',
+                    brutalCritDice: '1d10+2d8'
                   }
                 ]
               };
@@ -126,7 +135,8 @@
                   bonus: 10,
                   damageDice: '1d8+5',
                   critRange: 20,
-                  critExtraDice: '1d10+2d8'
+                  smiteDice: '',
+                  brutalCritDice: '1d10+2d8'
                 }
               ]
             };
@@ -164,7 +174,8 @@
               bonus: 10,
               damageDice: '1d8+5',
               critRange: 20,
-              critExtraDice: ''
+              smiteDice: '',
+              brutalCritDice: ''
             }
           ]
         };
@@ -209,16 +220,16 @@
         return rolls;
       };
 
+      const rollDiceTotal = (diceConfig) => {
+        return diceConfig.reduce((sum, { num, sides }) => {
+          const rolls = rollDice(num, sides);
+          return sum + rolls.reduce((a, b) => a + b, 0);
+        }, 0);
+      };
+
       const rollDamage = (diceStr) => {
         const { dice, flat } = parseDice(diceStr);
-        let total = flat;
-        
-        dice.forEach(({ num, sides }) => {
-          const rolls = rollDice(num, sides);
-          total += rolls.reduce((a, b) => a + b, 0);
-        });
-        
-        return total;
+        return flat + rollDiceTotal(dice);
       };
 
       const rollD20 = () => {
@@ -235,45 +246,46 @@
         
         const attacks = [];
         let totalDamage = 0;
+        let smiteApplied = false;
         
         // Roll all attacks from all attack types
         activeChar.attackTypes.forEach(attackType => {
           for (let i = 0; i < attackType.count; i++) {
             const attackRoll = rollD20();
-             const isMiss = attackRoll === 1;
-             const totalAttack = isMiss ? -Infinity : attackRoll + attackType.bonus;
-             const isCrit = !isMiss && attackRoll >= attackType.critRange;
-            
-             let damage = 0;
-            
-             if (!isMiss) {
-               damage = rollDamage(attackType.damageDice);
-             
-               if (isCrit) {
-              const { dice, flat } = parseDice(attackType.damageDice);
-              let critDamage = flat;
-              dice.forEach(({ num, sides }) => {
-                const rolls = rollDice(num, sides);
-                critDamage += rolls.reduce((a, b) => a + b, 0);
-              });
-              damage += critDamage;
-              
-              if (attackType.critExtraDice) {
-                damage += rollDamage(attackType.critExtraDice);
+            const isMiss = attackRoll === 1;
+            const totalAttack = isMiss ? -Infinity : attackRoll + attackType.bonus;
+            const isCrit = !isMiss && attackRoll >= attackType.critRange;
+
+            let damage = 0;
+
+            if (!isMiss) {
+              const parsedDamage = parseDice(attackType.damageDice);
+              damage = parsedDamage.flat + rollDiceTotal(parsedDamage.dice);
+
+              if (isCrit) {
+                damage += rollDiceTotal(parsedDamage.dice);
+
+                if (attackType.brutalCritDice) {
+                  damage += rollDamage(attackType.brutalCritDice);
+                }
+
+                if (attackType.smiteDice && !smiteApplied) {
+                  damage += rollDamage(attackType.smiteDice);
+                  smiteApplied = true;
+                }
               }
-               }
-             
-               totalDamage += damage;
+
+              totalDamage += damage;
             }
-            
+
             attacks.push({
               typeIndex: activeChar.attackTypes.indexOf(attackType),
               typeName: attackType.name,
               attackRoll,
               totalAttack,
               damage,
-               isCrit,
-               isMiss
+              isCrit,
+              isMiss
             });
           }
         });
@@ -289,15 +301,16 @@
         let cumulativeDamage = totalDamage;
         
         attacks.forEach(attack => {
-           if (!attack.isMiss) {
-          thresholds.push({
-            ac: attack.totalAttack,
-            damage: cumulativeDamage,
-            isCrit: attack.isCrit,
-            typeName: attack.typeName
-          });
-          cumulativeDamage -= attack.damage;
-           }
+          if (!attack.isMiss) {
+            thresholds.push({
+              ac: attack.totalAttack,
+              damage: cumulativeDamage,
+              isCrit: attack.isCrit,
+              typeName: attack.typeName,
+              isNat20: attack.attackRoll === 20
+            });
+            cumulativeDamage -= attack.damage;
+          }
         });
         
         setResults({ attacks, thresholds, totalDamage });
@@ -310,6 +323,9 @@
         const parts = results.thresholds.map((t, i) => {
           const critNote = t.isCrit ? ' (crit)' : '';
           const typeNote = t.typeName ? ` [${t.typeName}]` : '';
+          if (t.isNat20) {
+            return `${t.damage} damage (nat 20 auto-hit)${typeNote}${critNote}`;
+          }
           return `${t.damage} damage if ${t.ac} hits${typeNote}${critNote}`;
         });
         
@@ -324,7 +340,8 @@
           bonus: 0,
           damageDice: '1d8',
           critRange: 20,
-          critExtraDice: ''
+          smiteDice: '',
+          brutalCritDice: ''
         });
         updateActiveChar({ attackTypes: newAttackTypes });
       };
@@ -520,12 +537,26 @@
                           </div>
                           <div>
                             <label className="block text-xs font-medium text-gray-300 mb-1">
-                              Extra Crit Dice
+                              Brutal Critical Dice (every crit)
                             </label>
                             <input
                               type="text"
-                              value={attackType.critExtraDice}
-                              onChange={(e) => updateAttackType(typeIndex, { critExtraDice: e.target.value })}
+                              value={attackType.brutalCritDice}
+                              onChange={(e) => updateAttackType(typeIndex, { brutalCritDice: e.target.value })}
+                              className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 mt-3">
+                          <div className="col-span-2">
+                            <label className="block text-xs font-medium text-gray-300 mb-1">
+                              Smite Dice (first crit only)
+                            </label>
+                            <input
+                              type="text"
+                              value={attackType.smiteDice}
+                              onChange={(e) => updateAttackType(typeIndex, { smiteDice: e.target.value })}
                               className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
                             />
                           </div>
