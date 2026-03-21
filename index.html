@@ -575,6 +575,7 @@
       const [showConfig, setShowConfig] = useState(true);
       const [results, setResults] = useState(null);
       const [attackMode, setAttackMode] = useState('normal');
+      const [showTypedDamageBreakdown, setShowTypedDamageBreakdown] = useState(true);
       const [diceRolls, setDiceRolls] = useState([]);
 
       useEffect(() => {
@@ -728,6 +729,66 @@
         return { dice, flat };
       };
 
+      const parseTypedDamageExpression = (expression) => {
+        if (!expression || !expression.trim()) {
+          return { segments: [], firstSpecifiedType: null };
+        }
+
+        const segments = [];
+        const consumedRanges = [];
+        const typedRegex = /([^()]+?)\s*\(([^)]+)\)/g;
+        let match;
+
+        while ((match = typedRegex.exec(expression)) !== null) {
+          const rawFormula = (match[1] || '').replace(/^\s*\+\s*/, '').trim();
+          const rawType = (match[2] || '').trim().toLowerCase();
+          if (!rawFormula) continue;
+
+          const parsed = parseDice(rawFormula);
+          segments.push({
+            dice: parsed.dice,
+            flat: parsed.flat,
+            type: rawType || null
+          });
+          consumedRanges.push([match.index, typedRegex.lastIndex]);
+        }
+
+        const firstSpecifiedType = segments.find(segment => !!segment.type)?.type || null;
+
+        if (!segments.length) {
+          const parsed = parseDice(expression);
+          return {
+            segments: [{ dice: parsed.dice, flat: parsed.flat, type: null }],
+            firstSpecifiedType: null
+          };
+        }
+
+        let remainder = '';
+        let cursor = 0;
+        consumedRanges.forEach(([start, end]) => {
+          remainder += expression.slice(cursor, start);
+          cursor = end;
+        });
+        remainder += expression.slice(cursor);
+        remainder = remainder
+          .replace(/^\s*\+\s*/, '')
+          .replace(/\s*\+\s*$/, '')
+          .trim();
+
+        if (remainder) {
+          const parsed = parseDice(remainder);
+          if (parsed.dice.length > 0 || parsed.flat !== 0) {
+            segments.push({
+              dice: parsed.dice,
+              flat: parsed.flat,
+              type: null
+            });
+          }
+        }
+
+        return { segments, firstSpecifiedType };
+      };
+
       const rollDie = (sides, label, collector, color = null) => {
         const value = Math.floor(Math.random() * sides) + 1;
         if (collector) {
@@ -751,10 +812,44 @@
         return flat + rollDiceTotal(dice, labelPrefix, collector, color);
       };
 
+      const mergeDamageTypes = (target, source, multiplier = 1) => {
+        Object.entries(source || {}).forEach(([type, value]) => {
+          if (!type) return;
+          target[type] = (target[type] || 0) + value * multiplier;
+          if (target[type] === 0) {
+            delete target[type];
+          }
+        });
+      };
+
+      const rollTypedDamage = (expression, labelPrefix, collector, fallbackType = null, colorResolver = getDamageColor) => {
+        const { segments, firstSpecifiedType } = parseTypedDamageExpression(expression);
+        let total = 0;
+        const typedDamage = {};
+
+        segments.forEach((segment) => {
+          const segmentColor = colorResolver(segment.dice?.length > 0 ? segment.dice[0].sides : null);
+          const segmentTotal = segment.flat + rollDiceTotal(segment.dice, labelPrefix, collector, segmentColor);
+          total += segmentTotal;
+
+          const effectiveType = segment.type || fallbackType || null;
+          if (effectiveType) {
+            typedDamage[effectiveType] = (typedDamage[effectiveType] || 0) + segmentTotal;
+          }
+        });
+
+        return {
+          total,
+          typedDamage,
+          firstSpecifiedType: firstSpecifiedType || fallbackType || null
+        };
+      };
+
       const rollD20 = (collector, attackMode) => {
         const getD20Color = () => {
           if (attackMode === 'advantage') return 0x22c55e; // green
           if (attackMode === 'disadvantage') return 0xef4444; // red
+          if (attackMode === 'elven') return 0xa78bfa; // violet
           return 0x3b82f6; // blue (normal)
         };
         const d20Color = getD20Color();
@@ -762,6 +857,12 @@
         if (attackMode === 'normal') {
           const roll = rollOnce();
           return { result: roll, rolls: [roll] };
+        }
+        if (attackMode === 'elven') {
+          const first = rollOnce('(1)');
+          const second = rollOnce('(2)');
+          const third = rollOnce('(3)');
+          return { result: Math.max(first, second, third), rolls: [first, second, third] };
         }
         const first = rollOnce('(1)');
         const second = rollOnce('(2)');
@@ -791,6 +892,7 @@
 
       // Determine effective attack mode based on per-attack advantage and global mode
       const getEffectiveAttackMode = (attackAdvantage, globalMode) => {
+        if (globalMode === 'elven') return 'elven';
         // If attack has advantage and global is disadvantage, they cancel to normal
         if (attackAdvantage && globalMode === 'disadvantage') return 'normal';
         // If either attack has advantage OR global is advantage, use advantage
@@ -820,22 +922,29 @@
             const isCrit = !isMiss && attackRoll >= attackType.critRange;
 
             let damage = 0;
+            const typedDamage = {};
 
             if (!isMiss) {
-              const parsedDamage = parseDice(attackType.damageDice);
-              damage = parsedDamage.flat + rollDiceTotal(parsedDamage.dice, `${attackType.name} dmg`, diceCollector, getDamageColor(parsedDamage.dice?.length > 0 ? parsedDamage.dice[0].sides : null));
+              const mainDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} dmg`, diceCollector, null, getDamageColor);
+              const primaryDamageType = mainDamage.firstSpecifiedType;
+              damage += mainDamage.total;
+              mergeDamageTypes(typedDamage, mainDamage.typedDamage);
 
               if (isCrit) {
-                damage += rollDiceTotal(parsedDamage.dice, `${attackType.name} crit`, diceCollector, getDamageColor(parsedDamage.dice?.length > 0 ? parsedDamage.dice[0].sides : null));
+                const critDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} crit`, diceCollector, null, getDamageColor);
+                damage += critDamage.total;
+                mergeDamageTypes(typedDamage, critDamage.typedDamage);
 
                 if (attackType.brutalCritDice) {
-                  const brutalDamage = parseDice(attackType.brutalCritDice);
-                  damage += rollDamage(attackType.brutalCritDice, `${attackType.name} brutal`, diceCollector, getBrutalColor());
+                  const brutalDamage = rollTypedDamage(attackType.brutalCritDice, `${attackType.name} brutal`, diceCollector, primaryDamageType, () => getBrutalColor());
+                  damage += brutalDamage.total;
+                  mergeDamageTypes(typedDamage, brutalDamage.typedDamage);
                 }
 
                 if (attackType.smiteDice && !smiteApplied) {
-                  const smiteDamage = parseDice(attackType.smiteDice);
-                  damage += rollDamage(attackType.smiteDice, `${attackType.name} smite`, diceCollector, getSmiteColor());
+                  const smiteDamage = rollTypedDamage(attackType.smiteDice, `${attackType.name} smite`, diceCollector, primaryDamageType, () => getSmiteColor());
+                  damage += smiteDamage.total;
+                  mergeDamageTypes(typedDamage, smiteDamage.typedDamage);
                   smiteApplied = true;
                 }
               }
@@ -850,6 +959,7 @@
               d20Rolls: d20Result.rolls,
               totalAttack,
               damage,
+              typedDamage,
               isCrit,
               isMiss
             });
@@ -865,17 +975,26 @@
         
         const thresholds = [];
         let cumulativeDamage = totalDamage;
+        const cumulativeTypedDamage = {};
+
+        attacks.forEach(attack => {
+          if (!attack.isMiss) {
+            mergeDamageTypes(cumulativeTypedDamage, attack.typedDamage);
+          }
+        });
         
         attacks.forEach(attack => {
           if (!attack.isMiss) {
             thresholds.push({
               ac: attack.totalAttack,
               damage: cumulativeDamage,
+              typedDamage: { ...cumulativeTypedDamage },
               isCrit: attack.isCrit,
               typeName: attack.typeName,
               isNat20: attack.attackRoll === 20
             });
             cumulativeDamage -= attack.damage;
+            mergeDamageTypes(cumulativeTypedDamage, attack.typedDamage, -1);
           }
         });
         
@@ -895,10 +1014,17 @@
         const parts = results.thresholds.map((t, i) => {
           const critNote = t.isCrit ? ' (crit)' : '';
           const typeNote = t.typeName ? ` [${t.typeName}]` : '';
+          const typedBreakdown = showTypedDamageBreakdown && t.typedDamage
+            ? Object.entries(t.typedDamage)
+                .filter(([, amount]) => amount > 0)
+                .map(([damageType, amount]) => `${amount} ${damageType}`)
+                .join(', ')
+            : '';
+          const typedNote = typedBreakdown ? ` (${typedBreakdown})` : '';
           if (t.isNat20) {
-            return `${t.damage} damage (nat 20 auto-hit)${typeNote}${critNote}`;
+            return `${t.damage} damage${typedNote} (nat 20 auto-hit)${typeNote}${critNote}`;
           }
-          return `${t.damage} damage if ${t.ac} hits${typeNote}${critNote}`;
+          return `${t.damage} damage${typedNote} if ${t.ac} hits${typeNote}${critNote}`;
         });
         
         return parts.join(', ');
@@ -995,7 +1121,8 @@
                     {[
                       { key: 'normal', label: 'Normal' },
                       { key: 'advantage', label: 'Advantage' },
-                      { key: 'disadvantage', label: 'Disadvantage' }
+                      { key: 'disadvantage', label: 'Disadvantage' },
+                      { key: 'elven', label: 'Elven Advantage' }
                     ].map(mode => (
                       <button
                         key={mode.key}
@@ -1010,6 +1137,15 @@
                       </button>
                     ))}
                   </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      checked={showTypedDamageBreakdown}
+                      onChange={(e) => setShowTypedDamageBreakdown(e.target.checked)}
+                      className="w-4 h-4 bg-gray-600 border-gray-500 rounded focus:ring-red-500"
+                    />
+                    Show typed damage breakdown in DM Summary
+                  </label>
                 </div>
               </div>
 
@@ -1166,7 +1302,7 @@
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-bold text-white">Results for {activeChar.name}</h2>
                   <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-700 text-gray-200 border border-gray-600">
-                    Mode: {attackMode.charAt(0).toUpperCase() + attackMode.slice(1)}
+                    Mode: {{ normal: 'Normal', advantage: 'Advantage', disadvantage: 'Disadvantage', elven: 'Elven Advantage' }[attackMode] || attackMode}
                   </span>
                 </div>
                 
@@ -1175,7 +1311,7 @@
                   <div className="space-y-2">
                     {results.attacks.map((attack, i) => {
                       const rollDisplay = attack.d20Rolls?.length > 1 
-                        ? `(${attack.d20Rolls[0]}, ${attack.d20Rolls[1]})` 
+                        ? `(${attack.d20Rolls.join(', ')})` 
                         : attack.attackRoll;
                       return (
                        <div key={i} className={`flex justify-between text-sm ${attack.isMiss ? 'bg-red-900 bg-opacity-50 p-2 rounded' : ''}`}>
