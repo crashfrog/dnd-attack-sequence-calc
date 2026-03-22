@@ -577,6 +577,7 @@
       const [attackMode, setAttackMode] = useState('normal');
       const [showTypedDamageBreakdown, setShowTypedDamageBreakdown] = useState(true);
       const [diceRolls, setDiceRolls] = useState([]);
+      const [xValue, setXValue] = useState(1);
 
       useEffect(() => {
         const loadCharacters = () => {
@@ -711,6 +712,8 @@
         setResults(null);
       };
 
+      const resolveX = (str, x) => str ? str.replace(/\{x\}/gi, String(x)) : str;
+
       const parseDice = (diceStr) => {
         if (!diceStr) return { dice: [], flat: 0 };
         const parts = diceStr.split('+').map(p => p.trim());
@@ -729,7 +732,8 @@
         return { dice, flat };
       };
 
-      const parseTypedDamageExpression = (expression) => {
+      const parseTypedDamageExpression = (expression, xValue = 1) => {
+        expression = resolveX(expression, xValue);
         if (!expression || !expression.trim()) {
           return { segments: [], firstSpecifiedType: null };
         }
@@ -822,8 +826,8 @@
         });
       };
 
-      const rollTypedDamage = (expression, labelPrefix, collector, fallbackType = null, colorResolver = getDamageColor) => {
-        const { segments, firstSpecifiedType } = parseTypedDamageExpression(expression);
+      const rollTypedDamage = (expression, labelPrefix, collector, fallbackType = null, colorResolver = getDamageColor, xValue = 1) => {
+        const { segments, firstSpecifiedType } = parseTypedDamageExpression(expression, xValue);
         let total = 0;
         const typedDamage = {};
 
@@ -925,24 +929,24 @@
             const typedDamage = {};
 
             if (!isMiss) {
-              const mainDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} dmg`, diceCollector, null, getDamageColor);
+              const mainDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} dmg`, diceCollector, null, getDamageColor, xValue);
               const primaryDamageType = mainDamage.firstSpecifiedType;
               damage += mainDamage.total;
               mergeDamageTypes(typedDamage, mainDamage.typedDamage);
 
               if (isCrit) {
-                const critDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} crit`, diceCollector, null, getDamageColor);
+                const critDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} crit`, diceCollector, null, getDamageColor, xValue);
                 damage += critDamage.total;
                 mergeDamageTypes(typedDamage, critDamage.typedDamage);
 
                 if (attackType.brutalCritDice) {
-                  const brutalDamage = rollTypedDamage(attackType.brutalCritDice, `${attackType.name} brutal`, diceCollector, primaryDamageType, () => getBrutalColor());
+                  const brutalDamage = rollTypedDamage(attackType.brutalCritDice, `${attackType.name} brutal`, diceCollector, primaryDamageType, () => getBrutalColor(), xValue);
                   damage += brutalDamage.total;
                   mergeDamageTypes(typedDamage, brutalDamage.typedDamage);
                 }
 
                 if (attackType.smiteDice && !smiteApplied) {
-                  const smiteDamage = rollTypedDamage(attackType.smiteDice, `${attackType.name} smite`, diceCollector, primaryDamageType, () => getSmiteColor());
+                  const smiteDamage = rollTypedDamage(attackType.smiteDice, `${attackType.name} smite`, diceCollector, primaryDamageType, () => getSmiteColor(), xValue);
                   damage += smiteDamage.total;
                   mergeDamageTypes(typedDamage, smiteDamage.typedDamage);
                   smiteApplied = true;
@@ -1013,7 +1017,7 @@
         
         const parts = results.thresholds.map((t, i) => {
           const critNote = t.isCrit ? ' (crit)' : '';
-          const typeNote = t.typeName ? ` [${t.typeName}]` : '';
+          const typeNote = t.typeName ? ` [${resolveX(t.typeName, xValue)}]` : '';
           const typedBreakdown = showTypedDamageBreakdown && t.typedDamage
             ? Object.entries(t.typedDamage)
                 .filter(([, amount]) => amount > 0)
@@ -1092,7 +1096,7 @@
                         }`}
                       >
                         <User size={16} />
-                        {char.name}
+                        {resolveX(char.name, xValue)}
                       </button>
                       {characters.length > 1 && (
                         <button
@@ -1111,6 +1115,23 @@
                     <Plus size={16} />
                     Add Character
                   </button>
+                </div>
+                <div className="flex flex-col gap-2 p-3 bg-gray-800 rounded-lg border border-gray-700">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-200">X Value</span>
+                    <span className="text-xs text-gray-400">Spell slot scaling (0–9)</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={() => setXValue(v => Math.max(0, v - 1))}
+                      className="w-10 h-10 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-white text-lg font-bold rounded-lg transition-colors select-none"
+                    >−</button>
+                    <span className="text-white text-xl font-bold w-6 text-center">{xValue}</span>
+                    <button
+                      onClick={() => setXValue(v => Math.min(9, v + 1))}
+                      className="w-10 h-10 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-white text-lg font-bold rounded-lg transition-colors select-none"
+                    >+</button>
+                  </div>
                 </div>
                 <div className="flex flex-col gap-2 p-3 bg-gray-800 rounded-lg border border-gray-700">
                   <div className="flex items-center justify-between">
@@ -1300,7 +1321,7 @@
             {results && (
               <div className="bg-gray-800 rounded-lg shadow-2xl p-6">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-xl font-bold text-white">Results for {activeChar.name}</h2>
+                  <h2 className="text-xl font-bold text-white">Results for {resolveX(activeChar.name, xValue)}</h2>
                   <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-700 text-gray-200 border border-gray-600">
                     Mode: {{ normal: 'Normal', advantage: 'Advantage', disadvantage: 'Disadvantage', elven: 'Elven Advantage' }[attackMode] || attackMode}
                   </span>
@@ -1316,7 +1337,7 @@
                       return (
                        <div key={i} className={`flex justify-between text-sm ${attack.isMiss ? 'bg-red-900 bg-opacity-50 p-2 rounded' : ''}`}>
                          <span className={attack.isMiss ? 'text-red-300 font-bold' : attack.isCrit ? 'text-yellow-400 font-bold text-white' : 'text-white'}>
-                           Attack {i + 1} <span className="text-gray-400">[{attack.typeName}]</span>: d20={rollDisplay}
+                           Attack {i + 1} <span className="text-gray-400">[{resolveX(attack.typeName, xValue)}]</span>: d20={rollDisplay}
                            {attack.isMiss ? ' → MISS ✗' : ` → ${attack.totalAttack} to hit${attack.isCrit ? ' ⚡CRIT⚡' : ''}`}
                         </span>
                          <span className={`font-mono ${attack.isMiss ? 'text-red-300' : 'text-white'}`}>{attack.isMiss ? 'miss' : `${attack.damage} dmg`}</span>
