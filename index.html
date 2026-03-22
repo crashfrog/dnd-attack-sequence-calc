@@ -712,7 +712,16 @@
         setResults(null);
       };
 
-      const resolveX = (str, x) => str ? str.replace(/\{x\}/gi, String(x)) : str;
+      const resolveX = (str, x) => str ? str.replace(/\{x([+\-*/]\d+)?\}/gi, (_, expr) => {
+        if (!expr) return String(x);
+        const op = expr[0];
+        const num = parseInt(expr.slice(1), 10);
+        if (op === '+') return String(x + num);
+        if (op === '-') return String(x - num);
+        if (op === '*') return String(x * num);
+        if (op === '/') return num !== 0 ? String(Math.floor(x / num)) : '0';
+        return String(x);
+      }) : str;
 
       const parseDice = (diceStr) => {
         if (!diceStr) return { dice: [], flat: 0 };
