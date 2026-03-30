@@ -590,6 +590,7 @@
                 if (!char.attackTypes) {
                   return {
                     name: char.name,
+                    elvenAdvantage: char.elvenAdvantage ?? false,
                     attackTypes: [
                       {
                         name: 'Attack',
@@ -606,6 +607,7 @@
                 }
                 return {
                   ...char,
+                  elvenAdvantage: char.elvenAdvantage ?? false,
                   attackTypes: char.attackTypes.map(at => ({
                     ...at,
                     smiteDice: at.smiteDice ?? '',
@@ -618,6 +620,7 @@
             } else {
               const defaultChar = {
                 name: 'Character 1',
+                elvenAdvantage: false,
                 attackTypes: [
                   {
                     name: 'Attack',
@@ -636,6 +639,7 @@
           } catch (error) {
             const defaultChar = {
               name: 'Character 1',
+              elvenAdvantage: false,
               attackTypes: [
                 {
                   name: 'Attack',
@@ -684,6 +688,7 @@
       const addCharacter = () => {
         const newChar = {
           name: `Character ${characters.length + 1}`,
+          elvenAdvantage: false,
           attackTypes: [
             {
               name: 'Basic Attack',
@@ -712,10 +717,17 @@
         setResults(null);
       };
 
-      const resolveX = (str, x) => str ? str.replace(/\{x([+\-*/]\d+)?\}/gi, (_, expr) => {
-        if (!expr) return String(x);
-        const op = expr[0];
-        const num = parseInt(expr.slice(1), 10);
+      const resolveX = (str, x) => str ? str.replace(/\{x(?::(-?\d+)\/(\d+)|([+\-*/]\d+))?\}/gi, (_, startExpr, stepExpr, arithmeticExpr) => {
+        if (startExpr !== undefined && stepExpr !== undefined) {
+          const start = parseInt(startExpr, 10);
+          const step = parseInt(stepExpr, 10);
+          if (step <= 0) return '0';
+          return String(Math.max(0, Math.floor((x - start) / step) + 1));
+        }
+
+        if (!arithmeticExpr) return String(x);
+        const op = arithmeticExpr[0];
+        const num = parseInt(arithmeticExpr.slice(1), 10);
         if (op === '+') return String(x + num);
         if (op === '-') return String(x - num);
         if (op === '*') return String(x * num);
@@ -903,16 +915,15 @@
       // Brutal critical dice color - red
       const getBrutalColor = () => 0xdc2626; // red
 
-      // Determine effective attack mode based on per-attack advantage and global mode
-      const getEffectiveAttackMode = (attackAdvantage, globalMode) => {
-        if (globalMode === 'elven') return 'elven';
-        // If attack has advantage and global is disadvantage, they cancel to normal
-        if (attackAdvantage && globalMode === 'disadvantage') return 'normal';
-        // If either attack has advantage OR global is advantage, use advantage
-        if (attackAdvantage || globalMode === 'advantage') return 'advantage';
-        // If attack doesn't have advantage and global is disadvantage, use disadvantage
-        if (!attackAdvantage && globalMode === 'disadvantage') return 'disadvantage';
-        // Otherwise normal
+      // Determine effective attack mode based on per-attack advantage, global mode,
+      // and character-level Elven Advantage preference.
+      const getEffectiveAttackMode = (attackAdvantage, globalMode, useElvenAdvantage) => {
+        const hasAdvantage = attackAdvantage || globalMode === 'advantage';
+        const hasDisadvantage = globalMode === 'disadvantage';
+
+        if (hasAdvantage && hasDisadvantage) return 'normal';
+        if (hasAdvantage) return useElvenAdvantage ? 'elven' : 'advantage';
+        if (hasDisadvantage) return 'disadvantage';
         return 'normal';
       };
 
@@ -927,7 +938,7 @@
         // Roll all attacks from all attack types
         activeChar.attackTypes.forEach(attackType => {
           for (let i = 0; i < attackType.count; i++) {
-            const effectiveMode = getEffectiveAttackMode(attackType.advantage, attackMode);
+            const effectiveMode = getEffectiveAttackMode(attackType.advantage, attackMode, !!activeChar.elvenAdvantage);
             const d20Result = rollD20(diceCollector, effectiveMode);
             const attackRoll = d20Result.result;
             const isMiss = attackRoll === 1;
@@ -1141,6 +1152,16 @@
                       className="w-10 h-10 flex items-center justify-center bg-gray-700 hover:bg-gray-600 text-white text-lg font-bold rounded-lg transition-colors select-none"
                     >+</button>
                   </div>
+                  <div className="text-xs text-gray-400 leading-relaxed">
+                    <span className="font-semibold text-gray-300">Token syntax in any dice/name field:</span>{" "}
+                    <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x}"}</code> current value &nbsp;·&nbsp;
+                    <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x+2}"}</code> add &nbsp;·&nbsp;
+                    <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x-1}"}</code> subtract &nbsp;·&nbsp;
+                    <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x*2}"}</code> multiply &nbsp;·&nbsp;
+                    <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x/2}"}</code> floor-divide<br/>
+                    <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x:3/2}"}</code>{" "}
+                    step scaling — starts at 1 when x=3, +1 per 2 levels (e.g. Shadow Blade: <code className="bg-gray-700 px-1 rounded text-gray-200">{"2d8+{x:3/2}d8"}</code>)
+                  </div>
                 </div>
                 <div className="flex flex-col gap-2 p-3 bg-gray-800 rounded-lg border border-gray-700">
                   <div className="flex items-center justify-between">
@@ -1151,8 +1172,7 @@
                     {[
                       { key: 'normal', label: 'Normal' },
                       { key: 'advantage', label: 'Advantage' },
-                      { key: 'disadvantage', label: 'Disadvantage' },
-                      { key: 'elven', label: 'Elven Advantage' }
+                      { key: 'disadvantage', label: 'Disadvantage' }
                     ].map(mode => (
                       <button
                         key={mode.key}
@@ -1191,6 +1211,18 @@
                       onChange={(e) => updateActiveChar({ name: e.target.value })}
                       className="w-full px-3 py-2 bg-gray-700 text-white rounded border border-gray-600 focus:border-red-500 focus:outline-none"
                     />
+                  </div>
+
+                  <div>
+                    <label className="flex items-center text-sm text-gray-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!activeChar.elvenAdvantage}
+                        onChange={(e) => updateActiveChar({ elvenAdvantage: e.target.checked })}
+                        className="mr-2 w-4 h-4 bg-gray-600 border-gray-500 rounded focus:ring-red-500"
+                      />
+                      Use Elven Advantage when this character has advantage
+                    </label>
                   </div>
 
                   <div className="border-t border-gray-600 pt-4">
@@ -1264,7 +1296,7 @@
 
                         <div className="mb-3">
                           <label className="block text-xs font-medium text-gray-300 mb-1">
-                            Damage Dice (e.g., "1d8+5")
+                            Damage Dice (e.g., "1d8+5", {"2d8+{x:3/2}d8"})
                           </label>
                           <input
                             type="text"
@@ -1332,7 +1364,7 @@
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-bold text-white">Results for {resolveX(activeChar.name, xValue)}</h2>
                   <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-700 text-gray-200 border border-gray-600">
-                    Mode: {{ normal: 'Normal', advantage: 'Advantage', disadvantage: 'Disadvantage', elven: 'Elven Advantage' }[attackMode] || attackMode}
+                    Mode: {{ normal: 'Normal', advantage: 'Advantage', disadvantage: 'Disadvantage' }[attackMode] || attackMode}{activeChar.elvenAdvantage ? ' + Elven on Advantage' : ''}
                   </span>
                 </div>
                 
