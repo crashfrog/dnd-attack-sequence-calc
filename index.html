@@ -576,7 +576,6 @@
       const [results, setResults] = useState(null);
       const [attackMode, setAttackMode] = useState('normal');
       const [showTypedDamageBreakdown, setShowTypedDamageBreakdown] = useState(true);
-      const [diceRolls, setDiceRolls] = useState([]);
       const [xValue, setXValue] = useState(1);
 
       useEffect(() => {
@@ -608,6 +607,7 @@
                 return {
                   ...char,
                   elvenAdvantage: char.elvenAdvantage ?? false,
+                  savageAttacker: char.savageAttacker ?? false,
                   attackTypes: char.attackTypes.map(at => ({
                     ...at,
                     smiteDice: at.smiteDice ?? '',
@@ -621,6 +621,7 @@
               const defaultChar = {
                 name: 'Character 1',
                 elvenAdvantage: false,
+                savageAttacker: false,
                 attackTypes: [
                   {
                     name: 'Attack',
@@ -640,6 +641,7 @@
             const defaultChar = {
               name: 'Character 1',
               elvenAdvantage: false,
+              savageAttacker: false,
               attackTypes: [
                 {
                   name: 'Attack',
@@ -668,14 +670,6 @@
           }
         }
       }, [characters]);
-
-      useEffect(() => {
-        if (!diceRolls.length) return;
-        const timer = setTimeout(() => {
-          diceEngine.stop(() => setDiceRolls([]));
-        }, 3000);
-        return () => clearTimeout(timer);
-      }, [diceRolls]);
 
       const activeChar = characters[activeCharIndex] || null;
 
@@ -740,7 +734,7 @@
         const parts = diceStr.split('+').map(p => p.trim());
         const dice = [];
         let flat = 0;
-        
+
         parts.forEach(part => {
           if (part.includes('d')) {
             const [num, sides] = part.split('d').map(n => parseInt(n));
@@ -749,8 +743,19 @@
             flat += parseInt(part) || 0;
           }
         });
-        
+
         return { dice, flat };
+      };
+
+      const expectedValueOfDice = (diceConfig) => {
+        return diceConfig.reduce((sum, { num, sides }) => sum + num * (sides + 1) / 2, 0);
+      };
+
+      const expectedValueOfExpression = (expression, xVal = 1) => {
+        const { segments } = parseTypedDamageExpression(expression, xVal);
+        return segments.reduce((sum, segment) => {
+          return sum + segment.flat + expectedValueOfDice(segment.dice);
+        }, 0);
       };
 
       const parseTypedDamageExpression = (expression, xValue = 1) => {
@@ -929,15 +934,17 @@
 
       const performAttackSequence = () => {
         if (!activeChar) return;
-        
+
         const attacks = [];
         let totalDamage = 0;
         let smiteApplied = false;
+        let savageRerollUsed = false;
         const diceCollector = [];
-        
+
         // Roll all attacks from all attack types
         activeChar.attackTypes.forEach(attackType => {
-          for (let i = 0; i < attackType.count; i++) {
+          const attackCount = Math.max(0, parseInt(resolveX(String(attackType.count), xValue), 10) || 0);
+          for (let i = 0; i < attackCount; i++) {
             const effectiveMode = getEffectiveAttackMode(attackType.advantage, attackMode, !!activeChar.elvenAdvantage);
             const d20Result = rollD20(diceCollector, effectiveMode);
             const attackRoll = d20Result.result;
@@ -947,12 +954,33 @@
 
             let damage = 0;
             const typedDamage = {};
+            let savageReroll = null;
 
             if (!isMiss) {
               const mainDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} dmg`, diceCollector, null, getDamageColor, xValue);
               const primaryDamageType = mainDamage.firstSpecifiedType;
               damage += mainDamage.total;
               mergeDamageTypes(typedDamage, mainDamage.typedDamage);
+
+              // Savage Attacker reroll logic
+              if (activeChar.savageAttacker && !savageRerollUsed && attackRoll > 10) {
+                const expectedMain = expectedValueOfExpression(attackType.damageDice, xValue);
+                if (mainDamage.total < expectedMain) {
+                  const rerollDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} savage reroll`, diceCollector, null, getDamageColor, xValue);
+                  savageRerollUsed = true;
+                  savageReroll = {
+                    original: mainDamage.total,
+                    reroll: rerollDamage.total,
+                    expected: expectedMain,
+                    used: rerollDamage.total > mainDamage.total
+                  };
+                  if (savageReroll.used) {
+                    damage = damage - mainDamage.total + rerollDamage.total;
+                    mergeDamageTypes(typedDamage, mainDamage.typedDamage, -1);
+                    mergeDamageTypes(typedDamage, rerollDamage.typedDamage);
+                  }
+                }
+              }
 
               if (isCrit) {
                 const critDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} crit`, diceCollector, null, getDamageColor, xValue);
@@ -985,7 +1013,8 @@
               damage,
               typedDamage,
               isCrit,
-              isMiss
+              isMiss,
+              savageReroll
             });
           }
         });
@@ -1023,13 +1052,7 @@
         });
         
         setResults({ attacks, thresholds, totalDamage });
-        setDiceRolls(diceCollector);
         setShowConfig(false);
-        
-        // Start dice physics animation
-        if (diceCollector.length > 0) {
-          setTimeout(() => diceEngine.start(diceCollector), 100);
-        }
       };
 
       const formatOutput = () => {
@@ -1225,6 +1248,18 @@
                     </label>
                   </div>
 
+                  <div>
+                    <label className="flex items-center text-sm text-gray-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!activeChar.savageAttacker}
+                        onChange={(e) => updateActiveChar({ savageAttacker: e.target.checked })}
+                        className="mr-2 w-4 h-4 bg-gray-600 border-gray-500 rounded focus:ring-red-500"
+                      />
+                      Use Savage Attacker rerolls
+                    </label>
+                  </div>
+
                   <div className="border-t border-gray-600 pt-4">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-lg font-semibold text-white">Attack Types</h3>
@@ -1262,10 +1297,9 @@
                               # of Attacks
                             </label>
                             <input
-                              type="number"
-                              min="1"
+                              type="text"
                               value={attackType.count}
-                              onChange={(e) => updateAttackType(typeIndex, { count: parseInt(e.target.value) })}
+                              onChange={(e) => updateAttackType(typeIndex, { count: e.target.value })}
                               className="w-full px-2 py-1 bg-gray-600 text-white rounded border border-gray-500 focus:border-red-500 focus:outline-none text-sm"
                             />
                           </div>
@@ -1372,14 +1406,18 @@
                   <h3 className="text-sm font-semibold text-gray-400 mb-3">Individual Attacks</h3>
                   <div className="space-y-2">
                     {results.attacks.map((attack, i) => {
-                      const rollDisplay = attack.d20Rolls?.length > 1 
-                        ? `(${attack.d20Rolls.join(', ')})` 
+                      const rollDisplay = attack.d20Rolls?.length > 1
+                        ? `(${attack.d20Rolls.join(', ')})`
                         : attack.attackRoll;
+                      const savageNote = attack.savageReroll
+                        ? ` [Savage: ${attack.savageReroll.original}→${attack.savageReroll.reroll}, ${attack.savageReroll.used ? 'used reroll' : 'kept original'}]`
+                        : '';
                       return (
                        <div key={i} className={`flex justify-between text-sm ${attack.isMiss ? 'bg-red-900 bg-opacity-50 p-2 rounded' : ''}`}>
                          <span className={attack.isMiss ? 'text-red-300 font-bold' : attack.isCrit ? 'text-yellow-400 font-bold text-white' : 'text-white'}>
                            Attack {i + 1} <span className="text-gray-400">[{resolveX(attack.typeName, xValue)}]</span>: d20={rollDisplay}
                            {attack.isMiss ? ' → MISS ✗' : ` → ${attack.totalAttack} to hit${attack.isCrit ? ' ⚡CRIT⚡' : ''}`}
+                           {attack.savageReroll && <span className="text-orange-400">{savageNote}</span>}
                         </span>
                          <span className={`font-mono ${attack.isMiss ? 'text-red-300' : 'text-white'}`}>{attack.isMiss ? 'miss' : `${attack.damage} dmg`}</span>
                       </div>
