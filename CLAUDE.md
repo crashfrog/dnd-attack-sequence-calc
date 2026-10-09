@@ -30,7 +30,7 @@ Everything lives in `index.html`. Locate code by name, not line number (line num
 
 Roll logic is defined as closures inside `DnDAttackRoller`, not as pure module-level functions, so it cannot be unit-tested without extracting it.
 
-**State:** `characters`, `activeCharIndex`, `showConfig`, `results`, `attackMode` (global: normal/advantage/disadvantage), `showTypedDamageBreakdown`, `xValue`. Only `characters` is persisted.
+**State:** `characters`, `activeCharIndex`, `showConfig`, `results`, `attackMode` (global: normal/advantage/paralysis/disadvantage), `showTypedDamageBreakdown`, `xValue`. Only `characters` is persisted.
 
 **Data model** (localStorage key `dnd-characters`, saved on every change to `characters`):
 - Character: `name`, `elvenAdvantage`, `savageAttacker`, `attackTypes[]`.
@@ -46,16 +46,16 @@ Roll logic is defined as closures inside `DnDAttackRoller`, not as pure module-l
 - Resolved in attack `count`, all damage expressions, and character/attack names (display).
 
 **Dice and typed damage:**
-- `parseDice` splits on `+` only. It does not support subtraction (`1d8-1`), so negative modifiers parse incorrectly. `{x-1}` works because it resolves to a number before parsing.
+- `parseDice` tokenizes `+`/`-` terms with a regex: `1d8-1`, `2d6+1d4-2`, `-1d4+3`, and bare `d8` all work. Dice entries carry a `sign` (default 1); `rollDiceTotal` and `expectedValueOfDice` honor it.
 - Damage expressions support type annotations: `2d6(fire)+1d8(cold)`.
 - `parseTypedDamageExpression` returns `segments` (dice, flat, type) and `firstSpecifiedType`. Untyped segments are untyped on their own, but brutal-crit and smite rolls take the main damage's `firstSpecifiedType` as `fallbackType`.
 - `mergeDamageTypes(target, source, multiplier)` aggregates by type, deletes zeroed keys, and is used with `-1` to subtract attacks when computing thresholds.
 - `expectedValueOfExpression` computes mean damage (used by Savage Attacker).
 
 **Attack resolution** (`performAttackSequence`):
-- Effective mode comes from `getEffectiveAttackMode(attack.advantage, global attackMode, char.elvenAdvantage)`. Advantage plus disadvantage cancels to normal. Advantage with the character's `elvenAdvantage` becomes `elven` (3d20 keep highest). Per-attack `advantage` applies regardless of the global mode.
+- Effective mode comes from `getEffectiveAttackMode(attack.advantage, global attackMode, char.elvenAdvantage)`. The global `paralysis` mode counts as advantage (so it also becomes `elven` with Elven Advantage). Advantage plus disadvantage cancels to normal. Advantage with the character's `elvenAdvantage` becomes `elven` (3d20 keep highest). Per-attack `advantage` applies regardless of the global mode.
 - Natural 1 is an automatic miss (excluded from thresholds). Otherwise there is no AC comparison at roll time: each attack's total (`d20 + bonus`) is the AC it just reaches. A natural 20 is flagged `isNat20` and displayed as an auto-hit.
-- Crit = `d20 >= critRange`. A crit rolls `damageDice` a second time (so flat modifiers are doubled too), plus `brutalCritDice` on every crit, plus `smiteDice` on the first crit of the whole sequence only (`smiteApplied` spans all attack types).
+- Crit = `d20 >= critRange`, or any non-natural-1 hit in global `paralysis` mode (5e 2024: attacker assumed within 5 ft). A crit rolls the dice of `damageDice` a second time (`diceOnly`; flat modifiers are not doubled), plus `brutalCritDice` on every crit, plus `smiteDice` on the first crit of the whole sequence only (`smiteApplied` spans all attack types).
 - Savage Attacker (character-level): once per sequence, on a hit with d20 > 10 whose main damage is below its expected value, reroll the main damage and keep the higher result. Crit and extra dice are unaffected.
 - Attacks sort ascending by total, misses last. Thresholds walk that list: the damage at AC `n` is the cumulative damage of every attack with total >= `n`, built by subtracting each attack's damage as the walk moves up.
 - `formatOutput` builds the one-line summary string (`N damage (typed breakdown) if AC hits [attack name] (crit)`). `showTypedDamageBreakdown` toggles the typed portion.

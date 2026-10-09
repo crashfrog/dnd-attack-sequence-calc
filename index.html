@@ -731,24 +731,25 @@
 
       const parseDice = (diceStr) => {
         if (!diceStr) return { dice: [], flat: 0 };
-        const parts = diceStr.split('+').map(p => p.trim());
         const dice = [];
         let flat = 0;
+        const termRegex = /([+-]?)\s*(?:(\d*)d(\d+)|(\d+))/gi;
+        let match;
 
-        parts.forEach(part => {
-          if (part.includes('d')) {
-            const [num, sides] = part.split('d').map(n => parseInt(n));
-            dice.push({ num, sides });
+        while ((match = termRegex.exec(diceStr)) !== null) {
+          const sign = match[1] === '-' ? -1 : 1;
+          if (match[3] !== undefined) {
+            dice.push({ num: match[2] ? parseInt(match[2], 10) : 1, sides: parseInt(match[3], 10), sign });
           } else {
-            flat += parseInt(part) || 0;
+            flat += sign * parseInt(match[4], 10);
           }
-        });
+        }
 
         return { dice, flat };
       };
 
       const expectedValueOfDice = (diceConfig) => {
-        return diceConfig.reduce((sum, { num, sides }) => sum + num * (sides + 1) / 2, 0);
+        return diceConfig.reduce((sum, { num, sides, sign = 1 }) => sum + sign * num * (sides + 1) / 2, 0);
       };
 
       const expectedValueOfExpression = (expression, xVal = 1) => {
@@ -828,12 +829,12 @@
       };
 
       const rollDiceTotal = (diceConfig, labelPrefix, collector, color = null) => {
-        return diceConfig.reduce((sum, { num, sides }) => {
+        return diceConfig.reduce((sum, { num, sides, sign = 1 }) => {
           let subtotal = 0;
           for (let i = 0; i < num; i++) {
             subtotal += rollDie(sides, `${labelPrefix} d${sides}`, collector, color);
           }
-          return sum + subtotal;
+          return sum + sign * subtotal;
         }, 0);
       };
 
@@ -852,14 +853,14 @@
         });
       };
 
-      const rollTypedDamage = (expression, labelPrefix, collector, fallbackType = null, colorResolver = getDamageColor, xValue = 1) => {
+      const rollTypedDamage = (expression, labelPrefix, collector, fallbackType = null, colorResolver = getDamageColor, xValue = 1, diceOnly = false) => {
         const { segments, firstSpecifiedType } = parseTypedDamageExpression(expression, xValue);
         let total = 0;
         const typedDamage = {};
 
         segments.forEach((segment) => {
           const segmentColor = colorResolver(segment.dice?.length > 0 ? segment.dice[0].sides : null);
-          const segmentTotal = segment.flat + rollDiceTotal(segment.dice, labelPrefix, collector, segmentColor);
+          const segmentTotal = (diceOnly ? 0 : segment.flat) + rollDiceTotal(segment.dice, labelPrefix, collector, segmentColor);
           total += segmentTotal;
 
           const effectiveType = segment.type || fallbackType || null;
@@ -923,7 +924,8 @@
       // Determine effective attack mode based on per-attack advantage, global mode,
       // and character-level Elven Advantage preference.
       const getEffectiveAttackMode = (attackAdvantage, globalMode, useElvenAdvantage) => {
-        const hasAdvantage = attackAdvantage || globalMode === 'advantage';
+        // Paralysis: attacks have advantage, and any hit is a crit (attacker assumed within 5 ft)
+        const hasAdvantage = attackAdvantage || globalMode === 'advantage' || globalMode === 'paralysis';
         const hasDisadvantage = globalMode === 'disadvantage';
 
         if (hasAdvantage && hasDisadvantage) return 'normal';
@@ -950,7 +952,7 @@
             const attackRoll = d20Result.result;
             const isMiss = attackRoll === 1;
             const totalAttack = isMiss ? -Infinity : attackRoll + attackType.bonus;
-            const isCrit = !isMiss && attackRoll >= attackType.critRange;
+            const isCrit = !isMiss && (attackMode === 'paralysis' || attackRoll >= attackType.critRange);
 
             let damage = 0;
             const typedDamage = {};
@@ -983,7 +985,7 @@
               }
 
               if (isCrit) {
-                const critDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} crit`, diceCollector, null, getDamageColor, xValue);
+                const critDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} crit`, diceCollector, null, getDamageColor, xValue, true);
                 damage += critDamage.total;
                 mergeDamageTypes(typedDamage, critDamage.typedDamage);
 
@@ -1195,6 +1197,7 @@
                     {[
                       { key: 'normal', label: 'Normal' },
                       { key: 'advantage', label: 'Advantage' },
+                      { key: 'paralysis', label: 'Paralysis' },
                       { key: 'disadvantage', label: 'Disadvantage' }
                     ].map(mode => (
                       <button
