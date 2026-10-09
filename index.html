@@ -577,6 +577,7 @@
       const [attackMode, setAttackMode] = useState('normal');
       const [showTypedDamageBreakdown, setShowTypedDamageBreakdown] = useState(true);
       const [xValue, setXValue] = useState(1);
+      const [showCalcLog, setShowCalcLog] = useState(false);
 
       useEffect(() => {
         const loadCharacters = () => {
@@ -828,12 +829,17 @@
         return value;
       };
 
-      const rollDiceTotal = (diceConfig, labelPrefix, collector, color = null) => {
+      // `breakdown`, when given, receives { num, sides, sign, rolls } per dice term for the calculation log
+      const rollDiceTotal = (diceConfig, labelPrefix, collector, color = null, breakdown = null) => {
         return diceConfig.reduce((sum, { num, sides, sign = 1 }) => {
           let subtotal = 0;
+          const rolls = [];
           for (let i = 0; i < num; i++) {
-            subtotal += rollDie(sides, `${labelPrefix} d${sides}`, collector, color);
+            const value = rollDie(sides, `${labelPrefix} d${sides}`, collector, color);
+            rolls.push(value);
+            subtotal += value;
           }
+          if (breakdown) breakdown.push({ num, sides, sign, rolls });
           return sum + sign * subtotal;
         }, 0);
       };
@@ -853,26 +859,55 @@
         });
       };
 
+      const formatDiceFormula = (dice, flat) => {
+        let out = dice.map((d, i) => {
+          const sign = d.sign < 0 ? '-' : (i > 0 ? '+' : '');
+          return `${sign}${d.num}d${d.sides}`;
+        }).join('');
+        if (flat !== 0) out += `${flat < 0 ? '-' : (out ? '+' : '')}${Math.abs(flat)}`;
+        return out || '0';
+      };
+
       const rollTypedDamage = (expression, labelPrefix, collector, fallbackType = null, colorResolver = getDamageColor, xValue = 1, diceOnly = false) => {
         const { segments, firstSpecifiedType } = parseTypedDamageExpression(expression, xValue);
         let total = 0;
         const typedDamage = {};
+        const detailSegments = [];
 
         segments.forEach((segment) => {
           const segmentColor = colorResolver(segment.dice?.length > 0 ? segment.dice[0].sides : null);
-          const segmentTotal = (diceOnly ? 0 : segment.flat) + rollDiceTotal(segment.dice, labelPrefix, collector, segmentColor);
+          const termRolls = [];
+          const appliedFlat = diceOnly ? 0 : segment.flat;
+          const segmentTotal = appliedFlat + rollDiceTotal(segment.dice, labelPrefix, collector, segmentColor, termRolls);
           total += segmentTotal;
 
           const effectiveType = segment.type || fallbackType || null;
           if (effectiveType) {
             typedDamage[effectiveType] = (typedDamage[effectiveType] || 0) + segmentTotal;
           }
+
+          detailSegments.push({
+            type: effectiveType,
+            declaredType: segment.type,
+            formula: formatDiceFormula(segment.dice, segment.flat),
+            terms: termRolls,
+            flat: appliedFlat,
+            flatIgnored: diceOnly ? segment.flat : 0,
+            total: segmentTotal
+          });
         });
 
         return {
           total,
           typedDamage,
-          firstSpecifiedType: firstSpecifiedType || fallbackType || null
+          firstSpecifiedType: firstSpecifiedType || fallbackType || null,
+          detail: {
+            source: expression,
+            resolved: resolveX(expression, xValue),
+            diceOnly,
+            segments: detailSegments,
+            total
+          }
         };
       };
 
@@ -957,12 +992,16 @@
             let damage = 0;
             const typedDamage = {};
             let savageReroll = null;
+            const log = [];
+            const notes = [];
 
             if (!isMiss) {
               const mainDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} dmg`, diceCollector, null, getDamageColor, xValue);
               const primaryDamageType = mainDamage.firstSpecifiedType;
               damage += mainDamage.total;
               mergeDamageTypes(typedDamage, mainDamage.typedDamage);
+              const mainLogEntry = { kind: 'Damage', detail: mainDamage.detail, counted: true };
+              log.push(mainLogEntry);
 
               // Savage Attacker reroll logic
               if (activeChar.savageAttacker && !savageRerollUsed && attackRoll > 10) {
@@ -976,6 +1015,13 @@
                     expected: expectedMain,
                     used: rerollDamage.total > mainDamage.total
                   };
+                  mainLogEntry.counted = !savageReroll.used;
+                  log.push({
+                    kind: 'Savage Attacker reroll',
+                    detail: rerollDamage.detail,
+                    counted: savageReroll.used,
+                    note: `first damage ${mainDamage.total} < expected ${expectedMain.toFixed(1)}; reroll ${rerollDamage.total} → ${savageReroll.used ? 'reroll kept' : 'original kept'}`
+                  });
                   if (savageReroll.used) {
                     damage = damage - mainDamage.total + rerollDamage.total;
                     mergeDamageTypes(typedDamage, mainDamage.typedDamage, -1);
@@ -988,11 +1034,13 @@
                 const critDamage = rollTypedDamage(attackType.damageDice, `${attackType.name} crit`, diceCollector, null, getDamageColor, xValue, true);
                 damage += critDamage.total;
                 mergeDamageTypes(typedDamage, critDamage.typedDamage);
+                log.push({ kind: 'Crit (damage dice rolled again, flat not doubled)', detail: critDamage.detail, counted: true });
 
                 if (attackType.brutalCritDice) {
                   const brutalDamage = rollTypedDamage(attackType.brutalCritDice, `${attackType.name} brutal`, diceCollector, primaryDamageType, () => getBrutalColor(), xValue);
                   damage += brutalDamage.total;
                   mergeDamageTypes(typedDamage, brutalDamage.typedDamage);
+                  log.push({ kind: 'Brutal critical dice', detail: brutalDamage.detail, counted: true });
                 }
 
                 if (attackType.smiteDice && !smiteApplied) {
@@ -1002,7 +1050,11 @@
                   damage += smiteDamage.total + smiteCritDamage.total;
                   mergeDamageTypes(typedDamage, smiteDamage.typedDamage);
                   mergeDamageTypes(typedDamage, smiteCritDamage.typedDamage);
+                  log.push({ kind: 'Smite', detail: smiteDamage.detail, counted: true });
+                  log.push({ kind: 'Smite crit (dice doubled, flat not doubled)', detail: smiteCritDamage.detail, counted: true });
                   smiteApplied = true;
+                } else if (attackType.smiteDice) {
+                  notes.push('Smite skipped: already used on an earlier crit in roll order');
                 }
               }
 
@@ -1010,6 +1062,13 @@
             }
 
             attacks.push({
+              rollIndex: attacks.length + 1,
+              mode: effectiveMode,
+              bonus: attackType.bonus,
+              critRange: attackType.critRange,
+              critReason: !isCrit ? null : (attackMode === 'paralysis' ? 'paralysis' : 'natural'),
+              log,
+              notes,
               typeIndex: activeChar.attackTypes.indexOf(attackType),
               typeName: attackType.name,
               attackRoll,
@@ -1404,7 +1463,7 @@
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-bold text-white">Results for {resolveX(activeChar.name, xValue)}</h2>
                   <span className="px-3 py-1 rounded-full text-xs font-semibold bg-gray-700 text-gray-200 border border-gray-600">
-                    Mode: {{ normal: 'Normal', advantage: 'Advantage', disadvantage: 'Disadvantage' }[attackMode] || attackMode}{activeChar.elvenAdvantage ? ' + Elven on Advantage' : ''}
+                    Mode: {{ normal: 'Normal', advantage: 'Advantage', paralysis: 'Paralysis', disadvantage: 'Disadvantage' }[attackMode] || attackMode}{activeChar.elvenAdvantage ? ' + Elven on Advantage' : ''}
                   </span>
                 </div>
                 
@@ -1440,6 +1499,83 @@
                   <p className="text-white font-mono text-sm leading-relaxed break-words">
                     {formatOutput()}
                   </p>
+                </div>
+
+                <div className="mt-4">
+                  <button
+                    onClick={() => setShowCalcLog(!showCalcLog)}
+                    className="text-sm text-gray-300 hover:text-white underline"
+                  >
+                    {showCalcLog ? 'Hide' : 'Show'} calculation log
+                  </button>
+                  {showCalcLog && (
+                    <div className="mt-3 p-4 bg-gray-900 rounded-lg border border-gray-700 font-mono text-xs text-gray-200 space-y-4">
+                      <div className="text-gray-400">
+                        Attacks in roll order (the list above is sorted by to-hit). X = {xValue}. Expressions show the template with {'{x}'} resolved.
+                      </div>
+                      {[...results.attacks].sort((a, b) => a.rollIndex - b.rollIndex).map(attack => {
+                        const counted = attack.log.filter(entry => entry.counted);
+                        return (
+                          <div key={attack.rollIndex} className="border-t border-gray-700 pt-3 first:border-t-0 first:pt-0">
+                            <div className="font-bold text-white">
+                              #{attack.rollIndex} [{resolveX(attack.typeName, xValue)}]
+                            </div>
+                            <div>
+                              d20 ({attack.mode}): {attack.d20Rolls.length > 1 ? `(${attack.d20Rolls.join(', ')}) → ` : ''}{attack.attackRoll}
+                              {attack.isMiss
+                                ? ' → natural 1: auto-miss, no damage rolled'
+                                : ` + ${attack.bonus} = ${attack.totalAttack} to hit`}
+                            </div>
+                            {attack.critReason === 'natural' && (
+                              <div className="text-yellow-400">CRIT: natural {attack.attackRoll} ≥ crit range {attack.critRange}</div>
+                            )}
+                            {attack.critReason === 'paralysis' && (
+                              <div className="text-yellow-400">CRIT: Paralysis (any hit within 5 ft)</div>
+                            )}
+                            {attack.log.map((entry, k) => (
+                              <div key={k} className={`mt-2 pl-3 border-l-2 ${entry.counted ? 'border-gray-500' : 'border-gray-700 opacity-50'}`}>
+                                <div className="text-gray-300">
+                                  {entry.kind}: <span className="text-white">{entry.detail.resolved || '(empty)'}</span>
+                                  {entry.detail.resolved !== entry.detail.source && (
+                                    <span className="text-gray-500"> ← {entry.detail.source}</span>
+                                  )}
+                                  {!entry.counted && <span className="text-orange-400"> (not used)</span>}
+                                </div>
+                                {entry.note && <div className="text-orange-400">{entry.note}</div>}
+                                {entry.detail.segments.map((seg, m) => (
+                                  <div key={m} className="pl-3">
+                                    {seg.formula}{seg.type ? ` (${seg.type}${seg.declaredType ? '' : ', inherited'})` : ''}
+                                    {' → '}
+                                    {[
+                                      ...seg.terms.map(t => `${t.sign < 0 ? '-' : ''}${t.num}d${t.sides}[${t.rolls.join(', ')}]`),
+                                      ...(seg.flat !== 0 ? [String(seg.flat)] : [])
+                                    ].join(' + ') || '0'}
+                                    {seg.flatIgnored !== 0 && <span className="text-gray-500"> (flat {seg.flatIgnored} not doubled)</span>}
+                                    {' = '}{seg.total}
+                                  </div>
+                                ))}
+                                <div className="pl-3 text-gray-400">subtotal {entry.detail.total}</div>
+                              </div>
+                            ))}
+                            {attack.notes.map((note, k) => (
+                              <div key={k} className="mt-2 text-orange-400">{note}</div>
+                            ))}
+                            {!attack.isMiss && (
+                              <div className="mt-2 text-white">
+                                Damage: {counted.map(e => e.detail.total).join(' + ') || '0'} = {attack.damage}
+                                {Object.keys(attack.typedDamage).length > 0 && (
+                                  <span className="text-gray-400"> ({Object.entries(attack.typedDamage).map(([type, amount]) => `${amount} ${type}`).join(', ')})</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      <div className="border-t border-gray-700 pt-3 text-white font-bold">
+                        Total: {results.attacks.filter(a => !a.isMiss).map(a => a.damage).join(' + ') || '0'} = {results.totalDamage}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
