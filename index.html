@@ -881,7 +881,7 @@
           const segmentTotal = appliedFlat + rollDiceTotal(segment.dice, labelPrefix, collector, segmentColor, termRolls);
           total += segmentTotal;
 
-          const effectiveType = segment.type || fallbackType || null;
+          const effectiveType = segment.type || fallbackType || firstSpecifiedType || null;
           if (effectiveType) {
             typedDamage[effectiveType] = (typedDamage[effectiveType] || 0) + segmentTotal;
           }
