@@ -996,9 +996,12 @@
                 }
 
                 if (attackType.smiteDice && !smiteApplied) {
+                  // smiteDice holds the normal (non-crit) expression; the dice are doubled on the crit
                   const smiteDamage = rollTypedDamage(attackType.smiteDice, `${attackType.name} smite`, diceCollector, primaryDamageType, () => getSmiteColor(), xValue);
-                  damage += smiteDamage.total;
+                  const smiteCritDamage = rollTypedDamage(attackType.smiteDice, `${attackType.name} smite crit`, diceCollector, primaryDamageType, () => getSmiteColor(), xValue, true);
+                  damage += smiteDamage.total + smiteCritDamage.total;
                   mergeDamageTypes(typedDamage, smiteDamage.typedDamage);
+                  mergeDamageTypes(typedDamage, smiteCritDamage.typedDamage);
                   smiteApplied = true;
                 }
               }
@@ -1371,7 +1374,7 @@
                         <div className="grid grid-cols-2 gap-3 mt-3">
                           <div className="col-span-2">
                             <label className="block text-xs font-medium text-gray-300 mb-1">
-                              Smite Dice (first crit only)
+                              Smite Dice (normal damage; doubled on first crit only)
                             </label>
                             <input
                               type="text"
