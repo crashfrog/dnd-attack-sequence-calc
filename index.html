@@ -734,15 +734,18 @@
         if (!diceStr) return { dice: [], flat: 0 };
         const dice = [];
         let flat = 0;
-        const termRegex = /([+-]?)\s*(?:(\d*)d(\d+)|(\d+))/gi;
+        const termRegex = /([+-]?)\s*(?:(\d*)d(\d+)(?:m(\d+))?|(\d+))/gi;
         let match;
 
         while ((match = termRegex.exec(diceStr)) !== null) {
           const sign = match[1] === '-' ? -1 : 1;
           if (match[3] !== undefined) {
-            dice.push({ num: match[2] ? parseInt(match[2], 10) : 1, sides: parseInt(match[3], 10), sign });
+            const sides = parseInt(match[3], 10);
+            // "m" sets a per-die floor (8d8m2 treats rolled 1s as 2s); a floor above the die's max is clamped
+            const min = match[4] !== undefined ? Math.min(parseInt(match[4], 10), sides) : undefined;
+            dice.push({ num: match[2] ? parseInt(match[2], 10) : 1, sides, sign, ...(min > 1 ? { min } : {}) });
           } else {
-            flat += sign * parseInt(match[4], 10);
+            flat += sign * parseInt(match[5], 10);
           }
         }
 
@@ -750,7 +753,13 @@
       };
 
       const expectedValueOfDice = (diceConfig) => {
-        return diceConfig.reduce((sum, { num, sides, sign = 1 }) => sum + sign * num * (sides + 1) / 2, 0);
+        // Mean of one die with floor `min`: E[max(roll, min)]
+        const expectedValueOfDie = (sides, min = 1) => {
+          let total = 0;
+          for (let face = 1; face <= sides; face++) total += Math.max(face, min);
+          return total / sides;
+        };
+        return diceConfig.reduce((sum, { num, sides, sign = 1, min = 1 }) => sum + sign * num * expectedValueOfDie(sides, min), 0);
       };
 
       const expectedValueOfExpression = (expression, xVal = 1) => {
@@ -831,15 +840,18 @@
 
       // `breakdown`, when given, receives { num, sides, sign, rolls } per dice term for the calculation log
       const rollDiceTotal = (diceConfig, labelPrefix, collector, color = null, breakdown = null) => {
-        return diceConfig.reduce((sum, { num, sides, sign = 1 }) => {
+        return diceConfig.reduce((sum, { num, sides, sign = 1, min = 1 }) => {
           let subtotal = 0;
           const rolls = [];
+          const rawRolls = [];
           for (let i = 0; i < num; i++) {
-            const value = rollDie(sides, `${labelPrefix} d${sides}`, collector, color);
+            const raw = rollDie(sides, `${labelPrefix} d${sides}`, collector, color);
+            const value = Math.max(raw, min);
+            rawRolls.push(raw);
             rolls.push(value);
             subtotal += value;
           }
-          if (breakdown) breakdown.push({ num, sides, sign, rolls });
+          if (breakdown) breakdown.push({ num, sides, sign, min, rolls, rawRolls });
           return sum + sign * subtotal;
         }, 0);
       };
@@ -862,7 +874,7 @@
       const formatDiceFormula = (dice, flat) => {
         let out = dice.map((d, i) => {
           const sign = d.sign < 0 ? '-' : (i > 0 ? '+' : '');
-          return `${sign}${d.num}d${d.sides}`;
+          return `${sign}${d.num}d${d.sides}${d.min > 1 ? `m${d.min}` : ''}`;
         }).join('');
         if (flat !== 0) out += `${flat < 0 ? '-' : (out ? '+' : '')}${Math.abs(flat)}`;
         return out || '0';
@@ -1247,7 +1259,9 @@
                     <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x*2}"}</code> multiply &nbsp;·&nbsp;
                     <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x/2}"}</code> floor-divide<br/>
                     <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x:3/2}"}</code>{" "}
-                    step scaling — starts at 1 when x=3, +1 per 2 levels (e.g. Shadow Blade: <code className="bg-gray-700 px-1 rounded text-gray-200">{"2d8+{x:3/2}d8"}</code>)
+                    step scaling — starts at 1 when x=3, +1 per 2 levels (e.g. Shadow Blade: <code className="bg-gray-700 px-1 rounded text-gray-200">{"2d8+{x:3/2}d8"}</code>)<br/>
+                    <code className="bg-gray-700 px-1 rounded text-gray-200">8d8m2</code>{" "}
+                    per-die minimum — any die rolling below 2 counts as 2 (works with {"{x}"}, e.g. <code className="bg-gray-700 px-1 rounded text-gray-200">{"{x}d6m2"}</code>)
                   </div>
                 </div>
                 <div className="flex flex-col gap-2 p-3 bg-gray-800 rounded-lg border border-gray-700">
@@ -1547,7 +1561,7 @@
                                     {seg.formula}{seg.type ? ` (${seg.type}${seg.declaredType ? '' : ', inherited'})` : ''}
                                     {' → '}
                                     {[
-                                      ...seg.terms.map(t => `${t.sign < 0 ? '-' : ''}${t.num}d${t.sides}[${t.rolls.join(', ')}]`),
+                                      ...seg.terms.map(t => `${t.sign < 0 ? '-' : ''}${t.num}d${t.sides}${t.min > 1 ? `m${t.min}` : ''}[${t.rolls.map((v, r) => t.rawRolls[r] !== v ? `${t.rawRolls[r]}→${v}` : v).join(', ')}]`),
                                       ...(seg.flat !== 0 ? [String(seg.flat)] : [])
                                     ].join(' + ') || '0'}
                                     {seg.flatIgnored !== 0 && <span className="text-gray-500"> (flat {seg.flatIgnored} not doubled)</span>}

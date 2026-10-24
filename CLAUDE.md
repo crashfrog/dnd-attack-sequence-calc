@@ -47,6 +47,7 @@ Roll logic is defined as closures inside `DnDAttackRoller`, not as pure module-l
 
 **Dice and typed damage:**
 - `parseDice` tokenizes `+`/`-` terms with a regex: `1d8-1`, `2d6+1d4-2`, `-1d4+3`, and bare `d8` all work. Dice entries carry a `sign` (default 1); `rollDiceTotal` and `expectedValueOfDice` honor it.
+- `NdSmM` sets a per-die floor: `8d8m2` treats any rolled 1 as 2. Parsed into the dice entry's `min` (omitted when <= 1, clamped to the die size). `rollDiceTotal` applies it per die and records `rawRolls` next to the effective `rolls` for the calculation log (shown as `1→2`); `expectedValueOfDice` uses E[max(roll, min)] so Savage Attacker's threshold stays correct. Crit dice-only rerolls keep the floor. The `rollDie` collector still receives the raw roll.
 - Damage expressions support type annotations: `2d6(fire)+1d8(cold)`.
 - `parseTypedDamageExpression` returns `segments` (dice, flat, type) and `firstSpecifiedType`. In `rollTypedDamage`, an untyped segment takes `fallbackType` if given (brutal-crit and smite rolls pass the main damage's `firstSpecifiedType`), else the expression's own `firstSpecifiedType`. An expression with no types at all stays untyped.
 - `mergeDamageTypes(target, source, multiplier)` aggregates by type, deletes zeroed keys, and is used with `-1` to subtract attacks when computing thresholds.
